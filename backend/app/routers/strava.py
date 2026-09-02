@@ -15,6 +15,7 @@ from ..main import Base, SessionLocal, user_from_request, engine
 
 router = APIRouter(prefix="/integrations/strava", tags=["strava"])
 
+
 class StravaConnection(Base):
     __tablename__ = "strava_connections"
     id = Column(Integer, primary_key=True)
@@ -26,6 +27,7 @@ class StravaConnection(Base):
     scope = Column(String(255), default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class StravaActivity(Base):
     __tablename__ = "strava_activities"
@@ -42,6 +44,8 @@ class StravaActivity(Base):
     raw_json = Column(Text, default="{}")
     imported_at = Column(DateTime, default=datetime.utcnow)
 
+
+# Use the application's shared SQLAlchemy metadata so the athletes FK resolves.
 Base.metadata.create_all(engine)
 
 
@@ -73,7 +77,11 @@ def _api(path, token=None, method="GET", data=None, base="https://api-v3.strava.
 
 def _token_exchange(code=None, refresh_token=None):
     _require_config()
-    data = {"client_id": settings.strava_client_id, "client_secret": settings.strava_client_secret, "grant_type": "authorization_code" if code else "refresh_token"}
+    data = {
+        "client_id": settings.strava_client_id,
+        "client_secret": settings.strava_client_secret,
+        "grant_type": "authorization_code" if code else "refresh_token",
+    }
     data["code" if code else "refresh_token"] = code or refresh_token
     return _api("/api/v3/oauth/token", method="POST", data=data, base="https://www.strava.com")
 
@@ -95,8 +103,23 @@ def connect(request: Request):
     db = SessionLocal()
     try:
         user = user_from_request(request, db)
-        signed = jwt.encode({"athlete_id": user.athlete.id, "nonce": secrets.token_urlsafe(16), "exp": datetime.now(timezone.utc).timestamp() + 600}, settings.jwt_secret, algorithm="HS256")
-        params = {"client_id": settings.strava_client_id, "redirect_uri": settings.strava_redirect_uri, "response_type": "code", "approval_prompt": "auto", "scope": "activity:read_all", "state": signed}
+        signed = jwt.encode(
+            {
+                "athlete_id": user.athlete.id,
+                "nonce": secrets.token_urlsafe(16),
+                "exp": datetime.now(timezone.utc).timestamp() + 600,
+            },
+            settings.jwt_secret,
+            algorithm="HS256",
+        )
+        params = {
+            "client_id": settings.strava_client_id,
+            "redirect_uri": settings.strava_redirect_uri,
+            "response_type": "code",
+            "approval_prompt": "auto",
+            "scope": "activity:read_all",
+            "state": signed,
+        }
         return {"authorization_url": "https://www.strava.com/oauth/authorize?" + urllib.parse.urlencode(params)}
     finally:
         db.close()
@@ -120,11 +143,19 @@ def callback(code: str | None = None, state: str | None = None, error: str | Non
     db = SessionLocal()
     try:
         conn = db.query(StravaConnection).filter_by(athlete_id=athlete_id).first()
-        values = {"strava_athlete_id": strava_id, "access_token": data["access_token"], "refresh_token": data["refresh_token"], "expires_at": data["expires_at"], "scope": data.get("scope", "")}
+        values = {
+            "strava_athlete_id": strava_id,
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"],
+            "expires_at": data["expires_at"],
+            "scope": data.get("scope", ""),
+        }
         if not conn:
-            conn = StravaConnection(athlete_id=athlete_id, **values); db.add(conn)
+            conn = StravaConnection(athlete_id=athlete_id, **values)
+            db.add(conn)
         else:
-            for k, v in values.items(): setattr(conn, k, v)
+            for k, v in values.items():
+                setattr(conn, k, v)
         db.commit()
     finally:
         db.close()
@@ -137,7 +168,11 @@ def status(request: Request):
     try:
         athlete = user_from_request(request, db).athlete
         conn = db.query(StravaConnection).filter_by(athlete_id=athlete.id).first()
-        return {"connected": bool(conn), "strava_athlete_id": conn.strava_athlete_id if conn else None, "scope": conn.scope if conn else None}
+        return {
+            "connected": bool(conn),
+            "strava_athlete_id": conn.strava_athlete_id if conn else None,
+            "scope": conn.scope if conn else None,
+        }
     finally:
         db.close()
 
