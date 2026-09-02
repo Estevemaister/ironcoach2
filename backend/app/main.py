@@ -58,14 +58,14 @@ def bootstrap():
         u=db.query(User).filter_by(email='owner@ironcoach.local').first()
         if not u:
             u=User(email='owner@ironcoach.local',password_hash=pwd.hash('ironcoach-single-user')); u.athlete=Athlete(name='Atleta'); db.add(u); db.commit(); db.refresh(u)
-        r=JSONResponse({'ok':True,'single_user':True}); set_session(r,u.id); return r
+        r=JSONResponse({'ok':True,'single_user':True,'access_token':token(u.id),'token_type':'bearer'}); set_session(r,u.id); return r
     finally: db.close()
 @app.post('/auth/register')
 def register(p:RegisterIn):
     db=SessionLocal()
     try:
         if db.query(User).filter_by(email=p.email).first(): raise HTTPException(409,'Email already registered')
-        u=User(email=p.email,password_hash=pwd.hash(p.password)); u.athlete=Athlete(name=p.name); db.add(u); db.commit(); db.refresh(u); r=JSONResponse({'ok':True,'user_id':u.id}); set_session(r,u.id); return r
+        u=User(email=p.email,password_hash=pwd.hash(p.password)); u.athlete=Athlete(name=p.name); db.add(u); db.commit(); db.refresh(u); r=JSONResponse({'ok':True,'user_id':u.id,'access_token':token(u.id),'token_type':'bearer'}); set_session(r,u.id); return r
     finally: db.close()
 @app.post('/auth/login')
 def login(request:Request):
