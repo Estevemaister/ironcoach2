@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import declarative_base
+from jose import jwt
 
 from ..config import settings
 from ..main import SessionLocal, user_from_request, engine
@@ -96,7 +97,7 @@ def connect(request: Request):
     db = SessionLocal()
     try:
         user = user_from_request(request, db)
-        signed = __import__("jose").jwt.encode({"athlete_id": user.athlete.id, "nonce": secrets.token_urlsafe(16), "exp": datetime.now(timezone.utc).timestamp() + 600}, settings.jwt_secret, algorithm="HS256")
+        signed = jwt.encode({"athlete_id": user.athlete.id, "nonce": secrets.token_urlsafe(16), "exp": datetime.now(timezone.utc).timestamp() + 600}, settings.jwt_secret, algorithm="HS256")
         params = {"client_id": settings.strava_client_id, "redirect_uri": settings.strava_redirect_uri, "response_type": "code", "approval_prompt": "auto", "scope": "activity:read_all", "state": signed}
         return {"authorization_url": "https://www.strava.com/oauth/authorize?" + urllib.parse.urlencode(params)}
     finally:
@@ -109,7 +110,6 @@ def callback(code: str | None = None, state: str | None = None, error: str | Non
         return RedirectResponse(settings.frontend_url + "?strava=denied")
     if not code or not state:
         raise HTTPException(400, "Missing Strava OAuth parameters")
-    from jose import jwt
     try:
         payload = jwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
         athlete_id = int(payload["athlete_id"])
@@ -160,6 +160,7 @@ def import_activities(request: Request):
             if not row:
                 row = StravaActivity(athlete_id=athlete.id, strava_id=sid); db.add(row); imported += 1
             row.sport = x.get("sport_type") or x.get("type"); row.name = x.get("name")
+            row.start_date = datetime.fromisoformat(x["start_date"].replace("Z", "+00:00")) if x.get("start_date") else None
             row.duration_sec = int(x.get("moving_time") or x.get("elapsed_time") or 0)
             row.distance_m = int(x.get("distance") or 0)
             row.avg_hr = int(x["average_heartrate"]) if x.get("average_heartrate") else None
