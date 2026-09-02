@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import json
 import secrets
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -10,11 +11,9 @@ from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import declarative_base
 
 from ..config import settings
-from ..main import SessionLocal, User, user_from_request
+from ..main import SessionLocal, user_from_request, engine
 
 router = APIRouter(prefix="/integrations/strava", tags=["strava"])
-
-# Integration tables live in the same database and are intentionally small for MVP.
 IntegrationBase = declarative_base()
 
 class StravaConnection(IntegrationBase):
@@ -44,8 +43,6 @@ class StravaActivity(IntegrationBase):
     raw_json = Column(Text, default="{}")
     imported_at = Column(DateTime, default=datetime.utcnow)
 
-# create_all is safe for the additive MVP tables and keeps the deploy migration-free.
-from ..main import engine
 IntegrationBase.metadata.create_all(engine)
 
 
@@ -54,8 +51,8 @@ def _require_config():
         raise HTTPException(503, "Strava integration is not configured yet")
 
 
-def _api(path, token=None, method="GET", data=None):
-    url = "https://api-v3.strava.com" + path
+def _api(path, token=None, method="GET", data=None, base="https://api-v3.strava.com"):
+    url = base + path
     body = None
     headers = {"Accept": "application/json"}
     if token:
@@ -66,21 +63,20 @@ def _api(path, token=None, method="GET", data=None):
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read().decode()) if r.readable() else {}
+            raw = r.read().decode()
+            return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="ignore")
         raise HTTPException(e.code, f"Strava API error: {detail[:500]}")
+    except urllib.error.URLError as e:
+        raise HTTPException(502, f"Could not reach Strava: {e.reason}")
 
 
 def _token_exchange(code=None, refresh_token=None):
     _require_config()
-    data = {
-        "client_id": settings.strava_client_id,
-        "client_secret": settings.strava_client_secret,
-        "grant_type": "authorization_code" if code else "refresh_token",
-    }
+    data = {"client_id": settings.strava_client_id, "client_secret": settings.strava_client_secret, "grant_type": "authorization_code" if code else "refresh_token"}
     data["code" if code else "refresh_token"] = code or refresh_token
-    return _api("/oauth/token", method="POST", data=data)
+    return _api("/api/v3/oauth/token", method="POST", data=data, base="https://www.strava.com")
 
 
 def _valid_token(conn):
@@ -100,18 +96,8 @@ def connect(request: Request):
     db = SessionLocal()
     try:
         user = user_from_request(request, db)
-        state = secrets.token_urlsafe(32)
-        # State is bound to the authenticated athlete in a short-lived signed payload.
-        from jose import jwt
-        signed = jwt.encode({"state": state, "athlete_id": user.athlete.id, "exp": datetime.now(timezone.utc).timestamp() + 600}, settings.jwt_secret, algorithm="HS256")
-        params = {
-            "client_id": settings.strava_client_id,
-            "redirect_uri": settings.strava_redirect_uri,
-            "response_type": "code",
-            "approval_prompt": "auto",
-            "scope": "activity:read_all",
-            "state": signed,
-        }
+        signed = __import__("jose").jwt.encode({"athlete_id": user.athlete.id, "nonce": secrets.token_urlsafe(16), "exp": datetime.now(timezone.utc).timestamp() + 600}, settings.jwt_secret, algorithm="HS256")
+        params = {"client_id": settings.strava_client_id, "redirect_uri": settings.strava_redirect_uri, "response_type": "code", "approval_prompt": "auto", "scope": "activity:read_all", "state": signed}
         return {"authorization_url": "https://www.strava.com/oauth/authorize?" + urllib.parse.urlencode(params)}
     finally:
         db.close()
@@ -130,22 +116,17 @@ def callback(code: str | None = None, state: str | None = None, error: str | Non
     except Exception:
         raise HTTPException(400, "Invalid or expired OAuth state")
     data = _token_exchange(code=code)
-    athlete = data.get("athlete") or {}
-    strava_id = athlete.get("id")
+    strava_id = (data.get("athlete") or {}).get("id")
     if not strava_id:
         raise HTTPException(400, "Strava did not return athlete information")
     db = SessionLocal()
     try:
         conn = db.query(StravaConnection).filter_by(athlete_id=athlete_id).first()
+        values = {"strava_athlete_id": strava_id, "access_token": data["access_token"], "refresh_token": data["refresh_token"], "expires_at": data["expires_at"], "scope": data.get("scope", "")}
         if not conn:
-            conn = StravaConnection(athlete_id=athlete_id, strava_athlete_id=strava_id, access_token=data["access_token"], refresh_token=data["refresh_token"], expires_at=data["expires_at"], scope=data.get("scope", ""))
-            db.add(conn)
+            conn = StravaConnection(athlete_id=athlete_id, **values); db.add(conn)
         else:
-            conn.strava_athlete_id = strava_id
-            conn.access_token = data["access_token"]
-            conn.refresh_token = data["refresh_token"]
-            conn.expires_at = data["expires_at"]
-            conn.scope = data.get("scope", "")
+            for k, v in values.items(): setattr(conn, k, v)
         db.commit()
     finally:
         db.close()
@@ -169,21 +150,16 @@ def import_activities(request: Request):
     try:
         athlete = user_from_request(request, db).athlete
         conn = db.query(StravaConnection).filter_by(athlete_id=athlete.id).first()
-        if not conn:
-            raise HTTPException(400, "Connect Strava first")
+        if not conn: raise HTTPException(400, "Connect Strava first")
         token = _valid_token(conn)
         db.commit()
-        activities = _api("/api/v3/athlete/activities?per_page=100", token=token)
+        activities = _api("/athlete/activities?per_page=100", token=token)
         imported = 0
         for x in activities:
-            sid = int(x["id"])
-            row = db.query(StravaActivity).filter_by(strava_id=sid).first()
+            sid = int(x["id"]); row = db.query(StravaActivity).filter_by(strava_id=sid).first()
             if not row:
-                row = StravaActivity(athlete_id=athlete.id, strava_id=sid)
-                db.add(row)
-                imported += 1
-            row.sport = x.get("sport_type") or x.get("type")
-            row.name = x.get("name")
+                row = StravaActivity(athlete_id=athlete.id, strava_id=sid); db.add(row); imported += 1
+            row.sport = x.get("sport_type") or x.get("type"); row.name = x.get("name")
             row.duration_sec = int(x.get("moving_time") or x.get("elapsed_time") or 0)
             row.distance_m = int(x.get("distance") or 0)
             row.avg_hr = int(x["average_heartrate"]) if x.get("average_heartrate") else None
@@ -197,7 +173,6 @@ def import_activities(request: Request):
 
 @router.get("/webhook")
 def webhook_verify(request: Request):
-    # Strava validates the callback with hub.challenge; respond immediately.
     params = request.query_params
     if settings.strava_webhook_verify_token and params.get("hub.verify_token") != settings.strava_webhook_verify_token:
         raise HTTPException(403, "Invalid verify token")
@@ -206,5 +181,4 @@ def webhook_verify(request: Request):
 
 @router.post("/webhook")
 def webhook_event(payload: dict):
-    # Acknowledge quickly; processing can be moved to a worker as volume grows.
     return {"ok": True}
