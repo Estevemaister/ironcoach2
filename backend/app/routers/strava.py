@@ -8,16 +8,14 @@ import urllib.request
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import declarative_base
 from jose import jwt
 
 from ..config import settings
-from ..main import SessionLocal, user_from_request, engine
+from ..main import Base, SessionLocal, user_from_request, engine
 
 router = APIRouter(prefix="/integrations/strava", tags=["strava"])
-IntegrationBase = declarative_base()
 
-class StravaConnection(IntegrationBase):
+class StravaConnection(Base):
     __tablename__ = "strava_connections"
     id = Column(Integer, primary_key=True)
     athlete_id = Column(Integer, ForeignKey("athletes.id"), unique=True, nullable=False)
@@ -29,7 +27,7 @@ class StravaConnection(IntegrationBase):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-class StravaActivity(IntegrationBase):
+class StravaActivity(Base):
     __tablename__ = "strava_activities"
     id = Column(Integer, primary_key=True)
     athlete_id = Column(Integer, ForeignKey("athletes.id"), nullable=False, index=True)
@@ -44,7 +42,7 @@ class StravaActivity(IntegrationBase):
     raw_json = Column(Text, default="{}")
     imported_at = Column(DateTime, default=datetime.utcnow)
 
-IntegrationBase.metadata.create_all(engine)
+Base.metadata.create_all(engine)
 
 
 def _require_config():
@@ -150,16 +148,21 @@ def import_activities(request: Request):
     try:
         athlete = user_from_request(request, db).athlete
         conn = db.query(StravaConnection).filter_by(athlete_id=athlete.id).first()
-        if not conn: raise HTTPException(400, "Connect Strava first")
+        if not conn:
+            raise HTTPException(400, "Connect Strava first")
         token = _valid_token(conn)
         db.commit()
         activities = _api("/athlete/activities?per_page=100", token=token)
         imported = 0
         for x in activities:
-            sid = int(x["id"]); row = db.query(StravaActivity).filter_by(strava_id=sid).first()
+            sid = int(x["id"])
+            row = db.query(StravaActivity).filter_by(strava_id=sid).first()
             if not row:
-                row = StravaActivity(athlete_id=athlete.id, strava_id=sid); db.add(row); imported += 1
-            row.sport = x.get("sport_type") or x.get("type"); row.name = x.get("name")
+                row = StravaActivity(athlete_id=athlete.id, strava_id=sid)
+                db.add(row)
+                imported += 1
+            row.sport = x.get("sport_type") or x.get("type")
+            row.name = x.get("name")
             row.start_date = datetime.fromisoformat(x["start_date"].replace("Z", "+00:00")) if x.get("start_date") else None
             row.duration_sec = int(x.get("moving_time") or x.get("elapsed_time") or 0)
             row.distance_m = int(x.get("distance") or 0)
