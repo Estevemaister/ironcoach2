@@ -62,8 +62,6 @@ def register(p:RegisterIn):
 def login(request:Request):
     db=SessionLocal()
     try:
-        form=None
-        # OAuth2 form is parsed manually to keep the endpoint compatible with the PWA.
         import asyncio
         async def read(): return await request.body()
         raw=asyncio.run(read()).decode()
@@ -156,3 +154,6 @@ def coach(p:ChatIn,request:Request):
         elif 'sesión' in text or 'entreno' in text: answer='La sesión está diseñada para construir adaptación específica sin añadir fatiga innecesaria. Si tu recuperación cae, IronCoach reduce la carga antes de intentar compensarla.'
         return {'text':answer,'mode':p.mode}
     finally: db.close()
+
+from .routers.strava import router as strava_router
+app.include_router(strava_router)
