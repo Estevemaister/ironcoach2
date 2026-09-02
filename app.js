@@ -26,5 +26,5 @@ window.send=async()=>{const i=document.getElementById("msg"),q=i.value.trim();if
 window.connectStrava=async()=>{try{const d=await get("/integrations/strava/connect");location.href=d.authorization_url}catch(e){alert(e.message)}};
 window.importStrava=async()=>{try{const d=await post("/integrations/strava/import",{});alert(`Strava: ${d.imported} actividades importadas`);loadToday()}catch(e){alert(e.message)}};
 async function loadStravaStatus(){try{const d=await get("/integrations/strava/status");const el=document.getElementById("stravaStatus");if(el)el.textContent=d.connected?"Conectado · Strava listo para sincronizar":"No conectado"}catch{}}
-if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js");
+if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js?v=4").then(r=>r.update()).catch(()=>{});
 renderGate();
