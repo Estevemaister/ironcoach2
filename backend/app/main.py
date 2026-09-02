@@ -30,7 +30,7 @@ class Workout(Base):
 class WorkoutExecution(Base):
     __tablename__='workout_executions'; id=Column(Integer,primary_key=True); workout_id=Column(Integer,ForeignKey('workouts.id')); actual_duration_min=Column(Float); actual_rpe=Column(Float); notes=Column(Text); executed_at=Column(DateTime,default=datetime.utcnow)
 Base.metadata.create_all(engine)
-app=FastAPI(title='IronCoach API',version='0.4.0')
+app=FastAPI(title='IronCoach API',version='0.5.0')
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in settings.cors_origins.split(',') if x.strip()],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 
 def token(uid): return jwt.encode({'sub':str(uid),'exp':datetime.now(timezone.utc)+timedelta(hours=8)},settings.jwt_secret,algorithm='HS256')
@@ -50,7 +50,16 @@ class OnboardingIn(BaseModel): weight_kg:float|None=None; weekly_hours_target:fl
 class FeedbackIn(BaseModel): actual_duration_min:float; actual_rpe:float=Field(ge=1,le=10); notes:str=''
 class ChatIn(BaseModel): message:str; mode:str='coach'
 @app.get('/health')
-def health(): return {'status':'ok','service':'ironcoach-api','version':'0.4.0'}
+def health(): return {'status':'ok','service':'ironcoach-api','version':'0.5.0'}
+@app.get('/auth/bootstrap')
+def bootstrap():
+    db=SessionLocal()
+    try:
+        u=db.query(User).filter_by(email='owner@ironcoach.local').first()
+        if not u:
+            u=User(email='owner@ironcoach.local',password_hash=pwd.hash('ironcoach-single-user')); u.athlete=Athlete(name='Atleta'); db.add(u); db.commit(); db.refresh(u)
+        r=JSONResponse({'ok':True,'single_user':True}); set_session(r,u.id); return r
+    finally: db.close()
 @app.post('/auth/register')
 def register(p:RegisterIn):
     db=SessionLocal()
